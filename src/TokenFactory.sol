@@ -20,7 +20,11 @@ contract TokenFactory is Ownable {
      * @param symbol The symbol of the new token
      * @param contractBytecode The bytecode of the new token
      */
+    // q why are we deploying tokens like this?
+    // q is this more gas efficient?
     function deployToken(string memory symbol, bytes memory contractBytecode) public onlyOwner returns (address addr) {
+        //@audit high - this wont work on ZK sync due to different opcode..
+        // n ZK sync is EVM compatible but not EVM equivalent
         assembly {
             addr := create(0, add(contractBytecode, 0x20), mload(contractBytecode))
         }
@@ -28,6 +32,7 @@ contract TokenFactory is Ownable {
         emit TokenDeployed(symbol, addr);
     }
 
+    // n probably should be external not public as it's not used in this contract
     function getTokenAddressFromSymbol(string memory symbol) public view returns (address addr) {
         return s_tokenToAddress[symbol];
     }
