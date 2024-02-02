@@ -13,4 +13,5 @@
 1. Get the signed message
    1. Break into v, r, s
 2. Get the data the sender signed
+   1. Format the data to the EIP standard
 3. Use it as input parameters for `ecrrecover`

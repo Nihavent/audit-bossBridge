@@ -27,11 +27,12 @@ import { L1Vault } from "./L1Vault.sol";
 contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    //@audit-info should be a constant variable
     uint256 public DEPOSIT_LIMIT = 100_000 ether;
 
-    IERC20 public immutable token;
-    L1Vault public immutable vault;
-    mapping(address account => bool isSigner) public signers;
+    IERC20 public immutable token; // e one bridge per token
+    L1Vault public immutable vault; // e one vault per bridge
+    mapping(address account => bool isSigner) public signers; // e signers are users who can send a token from L1 to L2
 
     error L1BossBridge__DepositLimitReached();
     error L1BossBridge__Unauthorized();
@@ -54,6 +55,8 @@ contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
         _unpause();
     }
 
+    // e The owner can enable or disable addresses as signers
+    // q what happens if we disbale an account mid-transaction?
     function setSigner(address account, bool enabled) external onlyOwner {
         signers[account] = enabled;
     }
@@ -67,14 +70,21 @@ contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
      * @param l2Recipient The address of the user who will receive the tokens on L2
      * @param amount The amount of tokens to deposit
      */
+    // @audit high - arbitrary 'from' in safeTransferFrom - in this scenario a user is stealing tokens from another user who has approved the bridge
+    // e if a user approves the bridge, any other user can steal their funds
+    
+    // @audit high - users can transfer tokens from the vault to any address - in this scenario as user is stealing tokens from the L2 vault because the L1 vault has approved the bridge to spend tokens
+    // e if the vault approved the bridge, can a user steal funds from the vault?
+
     function depositTokensToL2(address from, address l2Recipient, uint256 amount) external whenNotPaused {
-        if (token.balanceOf(address(vault)) + amount > DEPOSIT_LIMIT) {
+        if (token.balanceOf(address(vault)) + amount > DEPOSIT_LIMIT) { // max vault balance
             revert L1BossBridge__DepositLimitReached();
         }
         token.safeTransferFrom(from, address(vault), amount);
 
         // Our off-chain service picks up this event and mints the corresponding tokens on L2
-        emit Deposit(from, l2Recipient, amount);
+        // @audit-info /low this event is emitted after calling safeTransferFrom, should follow CEI and emit before external call
+        emit Deposit(from, l2Recipient, amount); // e important event to mint tokens on L2 0
     }
 
     /*
@@ -88,6 +98,9 @@ contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
      * @param r The r value of the signature
      * @param s The s value of the signature
      */
+
+    // e When a signer notices that there were tokens deposited into the L2 vault, they sign a message to withdraw the tokens to L1. \
+    // e    This message is represented by 3 components: v, r, and s.
     function withdrawTokensToL1(address to, uint256 amount, uint8 v, bytes32 r, bytes32 s) external {
         sendToL1(
             v,
@@ -110,7 +123,7 @@ contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
      * @param message The message/data to be sent to L1 (can be blank)
      */
     function sendToL1(uint8 v, bytes32 r, bytes32 s, bytes memory message) public nonReentrant whenNotPaused {
-        address signer = ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(keccak256(message)), v, r, s);
+        address signer = ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(keccak256(message)), v, r, s); // e recover the signer from the signed message
 
         if (!signers[signer]) {
             revert L1BossBridge__Unauthorized();
@@ -118,6 +131,7 @@ contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
 
         (address target, uint256 value, bytes memory data) = abi.decode(message, (address, uint256, bytes));
 
+        // q slither picked this up as a high, need to check
         (bool success,) = target.call{ value: value }(data);
         if (!success) {
             revert L1BossBridge__CallFailed();
