@@ -244,5 +244,37 @@
 
 **Recommended Mitigation** Without increasing the cap of deposits, consider limiting the deposits from any single address to allow a sufficient number of users to use the platform.
 
-todo below:
+
+## Low
+
+### [L-1] The `TokenFactory::deployToken` does not check if a token with the same symbol has already been created, and can therefore deploy multiple token contracts with the same symbol
+
+**Description** `TokenFactory::deployToken` is not checking for duplicate token symbols:
+
+```javascript
+    function deployToken(string memory symbol, bytes memory contractBytecode) public onlyOwner returns (address addr) {
+        assembly {
+            addr := create(0, add(contractBytecode, 0x20), mload(contractBytecode))
+        }
+        s_tokenToAddress[symbol] = addr;
+        emit TokenDeployed(symbol, addr);
+    }
+```
+
+**Impact** If two tokens were created with the same symbol, the second token address would overwrite the first token address in the mapping `TokenFactory::s_tokenToAddress` 
+
+**Proof of Concept** Paste the following in `TokenFactoryTest.t.sol`:
+
+```javascript
+    function testDuplicateTokenSymbolOverridesExistingTokenAddressInMapping() public {
+    vm.startPrank(owner);
+    address original = tokenFactory.deployToken("TEST", type(L1Token).creationCode);
+    address duplicate = tokenFactory.deployToken("TEST", type(L1Token).creationCode);
+    
+    // We check the mapping and confirm that the duplicate token address is stored in the mapping under toke sumbol 'TEST'
+    assertEq(tokenFactory.getTokenAddressFromSymbol("TEST"), duplicate);
+    }
+```
+
+**Recommended Mitigation**
 

@@ -19,4 +19,19 @@ contract TokenFactoryTest is Test {
         address tokenAddress = tokenFactory.deployToken("TEST", type(L1Token).creationCode);
         assertEq(tokenFactory.getTokenAddressFromSymbol("TEST"), tokenAddress);
     }
+
+    /*//////////////////////////////////////////////////////////////
+                           Audit tests
+    //////////////////////////////////////////////////////////////*/
+
+    function testDuplicateTokenSymbolOverridesExistingTokenAddressInMapping() public {
+    vm.startPrank(owner);
+    address original = tokenFactory.deployToken("TEST", type(L1Token).creationCode);
+    address duplicate = tokenFactory.deployToken("TEST", type(L1Token).creationCode);
+    
+    // We check the mapping and confirm that the duplicate token address is stored in the mapping under toke sumbol 'TEST'
+    assertEq(tokenFactory.getTokenAddressFromSymbol("TEST"), duplicate);
+    }
+
 }
+
